@@ -3,7 +3,7 @@ import mlx.core as mx
 import torch
 import numpy as np
 
-BONUS_FACTOR = 4.5
+BONUS_FACTOR = 5
 
 
 def logits_to_probs(logits_tensor):
@@ -47,7 +47,7 @@ def find_target_gate_modules(model):
 def run_trial(model, tokens, walk_token, drive_token, gate_modules, expert_idx):
     target_ids = {id(module) for module in gate_modules}
     patched_classes = []
-    trial_stats = {"count": 0, "orig_score": None, "orig_weight": None, "modified_weight": None}
+    trial_stats = {"count": 0, "orig_score": None, "orig_weight": None, "modified_weight": None, "all_modified_weights": None}
 
     unique_classes = []
     for module in gate_modules:
@@ -76,6 +76,8 @@ def run_trial(model, tokens, walk_token, drive_token, gate_modules, expert_idx):
                             if stats["modified_weight"] is None:
                                 modified_softmax = torch.softmax(out, dim=-1)
                                 stats["modified_weight"] = float(modified_softmax[..., idx].reshape(-1)[-1].item())
+                                # Capture all modified weights for top-8 identification
+                                stats["all_modified_weights"] = [float(modified_softmax[..., i].reshape(-1)[-1].item()) for i in range(64)]
                     else:
                         arr = np.array(out)
                         if arr.shape[-1] >= 64:
@@ -96,6 +98,8 @@ def run_trial(model, tokens, walk_token, drive_token, gate_modules, expert_idx):
                                 modified_exp = np.exp(arr - arr_max)
                                 modified_softmax = modified_exp / np.sum(modified_exp, axis=-1, keepdims=True)
                                 stats["modified_weight"] = float(np.ravel(modified_softmax[..., idx])[-1])
+                                # Capture all modified weights for top-8 identification
+                                stats["all_modified_weights"] = [float(np.ravel(modified_softmax[..., i])[-1]) for i in range(64)]
                             out = mx.array(arr)
                 except Exception:
                     pass
@@ -138,6 +142,7 @@ def run_trial(model, tokens, walk_token, drive_token, gate_modules, expert_idx):
             trial_stats["orig_score"],
             trial_stats["orig_weight"],
             trial_stats["modified_weight"],
+            trial_stats["all_modified_weights"],
         )
 
     finally:
@@ -165,45 +170,50 @@ for expert_idx in range(64):
 
 print(f"Prompt: \"{prompt}\"\n")
 
-# Find top-8 experts by modified weight
-sorted_results = sorted(enumerate(results), key=lambda x: x[1][8] if x[1][8] is not None else 0, reverse=True)
-top_8_indices = [idx for idx, _ in sorted_results[:8]]
-top_8_results = [(idx, results[idx]) for idx in top_8_indices]
-
-# Calculate total weights for renormalization
-total_orig_weight = sum(result[6] for _, result in top_8_results if result[6] is not None)
-total_modified_weight = sum(result[8] for _, result in top_8_results if result[8] is not None)
-
-print("eid |  drive | walk_raw | drive_raw | orig_score | orig_weight | orig_weight(renorm) | modified_weight | modified_weight(renorm)")
-for expert_idx, result in top_8_results:
-    i, nw, nd, wraw, draw, hits, orig_score, orig_weight, modified_weight = result
+print("eid |  drive | walk_raw | drive_raw | orig_score | orig_weight | orig_weight(rn) | modif_weight | modif_weight(rn)")
+for expert_idx, result in enumerate(results):
+    i, nw, nd, wraw, draw, hits, orig_score, orig_weight, modified_weight, all_modified_weights = result
     score_str = "n/a" if orig_score is None else f"{orig_score:>10.4f}"
     
     # Raw weights
     if orig_weight is not None:
-        orig_weight_raw_str = f"{orig_weight:>11.4%}"
+        orig_weight_raw_str = f"{orig_weight:>10.4%}"
     else:
         orig_weight_raw_str = "n/a"
     
     if modified_weight is not None:
-        modified_weight_raw_str = f"{modified_weight:>15.4%}"
+        modified_weight_raw_str = f"{modified_weight:>12.4%}"
     else:
         modified_weight_raw_str = "n/a"
     
-    # Renormalize within top-8
-    if orig_weight is not None and total_orig_weight > 0:
-        renorm_orig = orig_weight / total_orig_weight
-        orig_weight_str = f"{renorm_orig:>18.4%}"
+    # Find top-8 experts within THIS trial by their modified weights
+    if all_modified_weights is not None:
+        sorted_by_modified = sorted(enumerate(all_modified_weights), key=lambda x: x[1], reverse=True)
+        top_8_indices = [idx for idx, _ in sorted_by_modified[:8]]
+        sum_top8_orig = sum(results[idx][7] for idx in top_8_indices if results[idx][7] is not None)
+        sum_top8_modified = sum(all_modified_weights[idx] for idx in top_8_indices if all_modified_weights[idx] is not None)
+        
+        # Renormalize this expert's weight relative to top-8 sum within this trial
+        if expert_idx in top_8_indices:
+            if orig_weight is not None and sum_top8_orig > 0:
+                renorm_orig = orig_weight / sum_top8_orig
+                renorm_orig_str = f"{renorm_orig:>14.4%}"
+            else:
+                renorm_orig_str = "n/a"
+            
+            if modified_weight is not None and sum_top8_modified > 0:
+                renorm_modified = modified_weight / sum_top8_modified
+                renorm_modified_str = f"{renorm_modified:>16.4%}"
+            else:
+                renorm_modified_str = "n/a"
+        else:
+            renorm_orig_str = f"{0:>14.4%}"
+            renorm_modified_str = f"{0:>16.4%}"
     else:
-        orig_weight_str = "n/a"
-    
-    if modified_weight is not None and total_modified_weight > 0:
-        renorm_modified = modified_weight / total_modified_weight
-        modified_weight_str = f"{renorm_modified:>20.4%}"
-    else:
-        modified_weight_str = "n/a"
+        renorm_orig_str = "n/a"
+        renorm_modified_str = "n/a"
     
     print(
-        f"{i:02d}  | {nd:>6.2%} | {wraw:>8.2%} | {draw:>9.2%} | {score_str} | {orig_weight_raw_str} | {orig_weight_str} | {modified_weight_raw_str} | {modified_weight_str}"
+        f"{i:02d}  | {nd:>6.2%} | {wraw:>8.2%} | {draw:>9.2%} | {score_str} | {orig_weight_raw_str} | {renorm_orig_str} | {modified_weight_raw_str} | {renorm_modified_str}"
     )
 
