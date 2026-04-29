@@ -3,7 +3,7 @@ import mlx.core as mx
 import torch
 import numpy as np
 
-BONUS_FACTOR = 8.0
+BONUS_FACTOR = -8 # expert 30
 
 
 def logits_to_probs(logits_tensor):
@@ -80,7 +80,7 @@ def run_trial(model, tokens, walk_token, drive_token, gate_modules, expert_idx):
                                 stats["all_orig_weights"] = [float(orig_softmax[..., i].reshape(-1)[-1].item()) for i in range(64)]
                             # Add bonus and calculate softmax weight AFTER bonus
                             out = out.clone()
-                            out[..., idx] = out[..., idx] + BONUS_FACTOR
+                            out[..., idx] = out[..., idx] * BONUS_FACTOR
                             if stats["modified_weight"] is None:
                                 modified_softmax = torch.softmax(out, dim=-1)
                                 stats["modified_weight"] = float(modified_softmax[..., idx].reshape(-1)[-1].item())
@@ -101,7 +101,7 @@ def run_trial(model, tokens, walk_token, drive_token, gate_modules, expert_idx):
                                 stats["all_orig_weights"] = [float(np.ravel(orig_softmax[..., i])[-1]) for i in range(64)]
                             # Add bonus and calculate softmax weight AFTER bonus (numerically stable)
                             arr = arr.copy()
-                            arr[..., idx] = arr[..., idx] + BONUS_FACTOR
+                            arr[..., idx] = arr[..., idx] * BONUS_FACTOR
                             if stats["modified_weight"] is None:
                                 arr_max = np.max(arr, axis=-1, keepdims=True)
                                 modified_exp = np.exp(arr - arr_max)
