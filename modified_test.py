@@ -3,7 +3,7 @@ import mlx.core as mx
 import torch
 import numpy as np
 
-BONUS_FACTOR = 5
+BONUS_FACTOR = 0.0
 
 
 def logits_to_probs(logits_tensor):
@@ -47,7 +47,14 @@ def find_target_gate_modules(model):
 def run_trial(model, tokens, walk_token, drive_token, gate_modules, expert_idx):
     target_ids = {id(module) for module in gate_modules}
     patched_classes = []
-    trial_stats = {"count": 0, "orig_score": None, "orig_weight": None, "modified_weight": None, "all_modified_weights": None}
+    trial_stats = {
+        "count": 0,
+        "orig_score": None,
+        "orig_weight": None,
+        "modified_weight": None,
+        "all_orig_weights": None,
+        "all_modified_weights": None,
+    }
 
     unique_classes = []
     for module in gate_modules:
@@ -70,6 +77,7 @@ def run_trial(model, tokens, walk_token, drive_token, gate_modules, expert_idx):
                             if stats["orig_weight"] is None:
                                 orig_softmax = torch.softmax(out, dim=-1)
                                 stats["orig_weight"] = float(orig_softmax[..., idx].reshape(-1)[-1].item())
+                                stats["all_orig_weights"] = [float(orig_softmax[..., i].reshape(-1)[-1].item()) for i in range(64)]
                             # Add bonus and calculate softmax weight AFTER bonus
                             out = out.clone()
                             out[..., idx] = out[..., idx] + BONUS_FACTOR
@@ -90,6 +98,7 @@ def run_trial(model, tokens, walk_token, drive_token, gate_modules, expert_idx):
                                 orig_exp = np.exp(arr - arr_max)
                                 orig_softmax = orig_exp / np.sum(orig_exp, axis=-1, keepdims=True)
                                 stats["orig_weight"] = float(np.ravel(orig_softmax[..., idx])[-1])
+                                stats["all_orig_weights"] = [float(np.ravel(orig_softmax[..., i])[-1]) for i in range(64)]
                             # Add bonus and calculate softmax weight AFTER bonus (numerically stable)
                             arr = arr.copy()
                             arr[..., idx] = arr[..., idx] + BONUS_FACTOR
@@ -142,6 +151,7 @@ def run_trial(model, tokens, walk_token, drive_token, gate_modules, expert_idx):
             trial_stats["orig_score"],
             trial_stats["orig_weight"],
             trial_stats["modified_weight"],
+            trial_stats["all_orig_weights"],
             trial_stats["all_modified_weights"],
         )
 
@@ -172,7 +182,7 @@ print(f"Prompt: \"{prompt}\"\n")
 
 print("eid |  drive | walk_raw | drive_raw | orig_score | orig_weight | orig_weight(rn) | modif_weight | modif_weight(rn)")
 for expert_idx, result in enumerate(results):
-    i, nw, nd, wraw, draw, hits, orig_score, orig_weight, modified_weight, all_modified_weights = result
+    i, nw, nd, wraw, draw, hits, orig_score, orig_weight, modified_weight, all_orig_weights, all_modified_weights = result
     score_str = "n/a" if orig_score is None else f"{orig_score:>10.4f}"
     
     # Raw weights
@@ -186,28 +196,26 @@ for expert_idx, result in enumerate(results):
     else:
         modified_weight_raw_str = "n/a"
     
-    # Find top-8 experts within THIS trial by their modified weights
-    if all_modified_weights is not None:
+    # Find top-8 experts within THIS trial for the original and modified weights separately
+    if all_orig_weights is not None and all_modified_weights is not None:
+        sorted_by_orig = sorted(enumerate(all_orig_weights), key=lambda x: x[1], reverse=True)
         sorted_by_modified = sorted(enumerate(all_modified_weights), key=lambda x: x[1], reverse=True)
-        top_8_indices = [idx for idx, _ in sorted_by_modified[:8]]
-        sum_top8_orig = sum(results[idx][7] for idx in top_8_indices if results[idx][7] is not None)
-        sum_top8_modified = sum(all_modified_weights[idx] for idx in top_8_indices if all_modified_weights[idx] is not None)
-        
-        # Renormalize this expert's weight relative to top-8 sum within this trial
-        if expert_idx in top_8_indices:
-            if orig_weight is not None and sum_top8_orig > 0:
-                renorm_orig = orig_weight / sum_top8_orig
-                renorm_orig_str = f"{renorm_orig:>14.4%}"
-            else:
-                renorm_orig_str = "n/a"
-            
-            if modified_weight is not None and sum_top8_modified > 0:
-                renorm_modified = modified_weight / sum_top8_modified
-                renorm_modified_str = f"{renorm_modified:>16.4%}"
-            else:
-                renorm_modified_str = "n/a"
+        top_8_orig_indices = [idx for idx, _ in sorted_by_orig[:8]]
+        top_8_modified_indices = [idx for idx, _ in sorted_by_modified[:8]]
+
+        sum_top8_orig = sum(all_orig_weights[idx] for idx in top_8_orig_indices if all_orig_weights[idx] is not None)
+        sum_top8_modified = sum(all_modified_weights[idx] for idx in top_8_modified_indices if all_modified_weights[idx] is not None)
+
+        if expert_idx in top_8_orig_indices and orig_weight is not None and sum_top8_orig > 0:
+            renorm_orig = orig_weight / sum_top8_orig
+            renorm_orig_str = f"{renorm_orig:>14.4%}"
         else:
             renorm_orig_str = f"{0:>14.4%}"
+
+        if expert_idx in top_8_modified_indices and modified_weight is not None and sum_top8_modified > 0:
+            renorm_modified = modified_weight / sum_top8_modified
+            renorm_modified_str = f"{renorm_modified:>16.4%}"
+        else:
             renorm_modified_str = f"{0:>16.4%}"
     else:
         renorm_orig_str = "n/a"
