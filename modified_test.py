@@ -3,7 +3,7 @@ import mlx.core as mx
 import torch
 import numpy as np
 
-BONUS_FACTOR = 0.0
+BONUS_FACTOR = 8.0
 
 
 def logits_to_probs(logits_tensor):
@@ -180,10 +180,12 @@ for expert_idx in range(64):
 
 print(f"Prompt: \"{prompt}\"\n")
 
-print("eid |  drive | walk_raw | drive_raw | orig_score | orig_weight | orig_weight(rn) | modif_weight | modif_weight(rn)")
+print("eid |  drive | brier | walk_raw | drive_raw | orig_score | orig_weight | orig_weight(rn) | modif_weight | modif_weight(rn)")
 for expert_idx, result in enumerate(results):
     i, nw, nd, wraw, draw, hits, orig_score, orig_weight, modified_weight, all_orig_weights, all_modified_weights = result
     score_str = "n/a" if orig_score is None else f"{orig_score:>10.4f}"
+    brier_score = (wraw - 0.0) ** 2 + (draw - 1.0) ** 2
+    brier_str = f"{brier_score:>6.4f}"
     
     # Raw weights
     if orig_weight is not None:
@@ -222,6 +224,6 @@ for expert_idx, result in enumerate(results):
         renorm_modified_str = "n/a"
     
     print(
-        f"{i:02d}  | {nd:>6.2%} | {wraw:>8.2%} | {draw:>9.2%} | {score_str} | {orig_weight_raw_str} | {renorm_orig_str} | {modified_weight_raw_str} | {renorm_modified_str}"
+        f"{i:02d}  | {nd:>6.2%} | {brier_str} | {wraw:>8.2%} | {draw:>9.2%} | {score_str} | {orig_weight_raw_str} | {renorm_orig_str} | {modified_weight_raw_str} | {renorm_modified_str}"
     )
 
